@@ -7,6 +7,7 @@ import fcntl
 import socket
 import struct
 import logging
+import netifaces
 import subprocess
 
 
