@@ -1,6 +1,6 @@
 PACKAGE_VERSION=0.0.1
 prefix=/usr
-plugin=wconn_pppoe
+plugin=wconn_dhcp
 
 all:
 

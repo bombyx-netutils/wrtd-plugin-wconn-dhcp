@@ -1,6 +1,6 @@
 #!/bin/bash
 
-LIBFILES="$(find ./wconn_pppoe -name '*.py' | tr '\n' ' ')"
+LIBFILES="$(find ./wconn_dhcp -name '*.py' | tr '\n' ' ')"
 ERRFLAG=0
 
 OUTPUT=`pyflakes ${LIBFILES} 2>&1`
