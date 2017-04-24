@@ -1,0 +1,4 @@
+{
+    "plugin", "generic-dhcp",
+    "interface": "enp3s0",
+}
