@@ -1,3 +1,5 @@
+import threading
+
 
 class _DhcpClient(threading.Thread):
 
@@ -17,10 +19,18 @@ class _DhcpClient(threading.Thread):
         self.lease_t2 = None
         self.lease_lifetime = None
 
+
+        # bad
         self.timeout_resend = None
         self.timeout_t1 = None
         self.timeout_t2 = None
         self.timeout_expire = None
+        # end bad
+
+        self.tfd_resend = None
+        self.tfd_t1 = None
+        self.tfd_t2 = None
+        self.tfd_expire = None
         self.attempt = None
 
         self.sock = None
@@ -38,54 +48,246 @@ class _DhcpClient(threading.Thread):
         self.bReportHostname = True
 
     def run(self):
-        self.client_start()
-
-        while True:
-
+        self._client_start()
 
         # fixme
-        if (client->state == DHCP_STATE_INIT)
-                client->start_time = now(clock_boottime_or_monotonic());
-
-
-        while True:
-
-
-        # get transaction id
-        if do_req:
-            xid = s.put(msg)['xid']
-        # wait for response
-        events = poll.poll(2)
-        for (fd, event) in events:
-            response = s.get()
-            if response['xid'] != xid:
-                do_req = False
-                continue
-            if response['options']['message_type'] != expect:
-                raise Exception("DHCP protocol error")
-            return response
-        do_req = True
-
-
-
-
-
-
-
-        while True :
-            client.GetNextDhcpPacket()
-            print client.str()
-
+        # if (client->state == DHCP_STATE_INIT)
+        #         client->start_time = now(clock_boottime_or_monotonic());
 
         self._sendDiscover()
-        self._getResponse()
-
-
-        pass
-
+        while True:
+            events = poll.poll(2)
+            for (fd, event) in events:
+                if fd == self.efd_abort:                   # fixme: need .fileno(), same below
+                    self._client_stop()
+                    break
+                elif fd == self.tfd_resend:
+                    self._client_timeout_resend()
+                elif fd == self.tfd_t1:
+                    self._client_timeout_t1()
+                elif fd == self.tfd_t2:
+                    self._client_timeout_t2()
+                elif fd == self.tfd_expire:
+                    self._client_timeout_expire()
+                elif fd == self.sock and event & select.POLLIN:
+                    assert False
+                elif fd == self.sock and event & select.POLLPRI:
+                    assert False
+                else:
+                    assert False
 
     def stop(self):
-        pass
+        self.efd_abort.write(1)
+
+    def _client_start(self):
+        self.state = DHCP_STATE_INIT
+        self.attempt = 1
+        self.xid = random()
+
+        self.sock = DHCP4Socket(self.ifname)
+
+        self.efd_abort = linuxfd.eventfd()
+
+        self.tfd_resend = linuxfd.timerfd()
+        self.tfd_t1 = linuxfd.timerfd()
+        self.tfd_t2 = linuxfd.timerfd()
+        self.tfd_expire = linuxfd.timerfd()
+
+        self.poll = select.poll()
+        self.poll.register(self.sock, select.POLLIN | select.POLLPRI)
+        self.poll.register(self.efd_abort, select.POLLIN)
+        self.poll.register(self.tfd_resend, select.POLLIN)
+        self.poll.register(self.tfd_t1, select.POLLIN)
+        self.poll.register(self.tfd_t2, select.POLLIN)
+        self.poll.register(self.tfd_expire, select.POLLIN)
+
+    def _client_stop(self):
+        self.onStop()
+
+        self.poll = None
+
+        if self.tfd_expire is not None:
+            self.tfd_expire.close()
+            self.tfd_expire = None
+
+        if self.tfd_t2 is not None:
+            self.tfd_t2.close()
+            self.tfd_t2 = None
+
+        if self.tfd_t1 is not None:
+            self.tfd_t1.close()
+            self.tfd_t1 = None
+
+        if self.tfd_resend is not None:
+            self.tfd_resend.close()
+            self.tfd_resend = None
+
+        if self.efd_abort is not None:
+            self.efd_abort.close()
+            self.efd_abort = None
+
+        if self.sock is not None:
+            self.sock.close()
+            self.sock = None
+
+        self.xid = None
+        self.attempt = None
+        self.state = None
+
+    def _client_timeout_resend(self):
+        # calculate next timeout
+        if self.state == DHCP_STATE_RENEWING:
+            time_left = (client.lease__t2 - client.lease__t1) / 2
+            time_left = max(time_left, 60)
+            next_timeout = time_left * USEC_PER_SEC;
+        elif self.state == DHCP_STATE_REBINDING:
+            time_left = (client.lease__lifetime - client.lease__t2) / 2
+            time_left = max(time_left, 60)
+            next_timeout = time_left * USEC_PER_SEC;
+        elif self.state in [DHCP_STATE_INIT, DHCP_STATE_SELECTING, DHCP_STATE_REQUESTING, DHCP_STATE_BOUND]:
+            if client.attempt < 64:
+                client.attempt *= 2
+            next_timeout = (client.attempt - 1) * USEC_PER_SEC;
+        else:
+            assert False
+        next_timeout += (random_u32() & 0x1fffff)
+
+        # do work
+        try:
+            if self.state == DHCP_STATE_INIT:
+                client_send_discover()
+                self.state = DHCP_STATE_SELECTING
+                self.attempt = 1
+            elif self.state == DHCP_STATE_SELECTING:
+                client_send_discover()
+            elif self.state in [DHCP_STATE_REQUESTING, DHCP_STATE_RENEWING, DHCP_STATE_REBINDING]:
+                client_send_request()
+                self.request_sent = time_now
+            elif self.state == DHCP_STATE_BOUND:
+                pass
+            else:
+                assert False
+        except:
+            if self.attempt >= 64
+                self.efd_abort.write(1)     # stop dhcp client
+                return
+
+        # start next timeout
+        self.tfd_resend.settime(next_timeout, 0)
+
+    def _client_timeout_t1(self):
+        # log_dhcp6_client(client, "Timeout T1");
+        self.state = DHCP_STATE_RENEWING
+        self.attempt = 1
+        self.tfd_resend.settime(next_timeout, 0)
+
+    def _client_timeout_t2(self):
+        # log_dhcp6_client(client, "Timeout T2");
+        client.state = DHCP_STATE_REBINDING
+        client.attempt = 1
+        self.tfd_resend.settime(next_timeout, 0)
+
+    def _client_timeout_expire(self):
+        self.onExpired()
+        _client_start(client)
+
+    def client_send_discover(self):
+        assert self.state in [DHCP_STATE_INIT, DHCP_STATE_SELECTING]
+
+        ipaddr = None
+        macaddr = None
+        if True:
+            addrDict = netifaces.ifaddresses(self.ifname)
+            if netifaces.AF_INET in addrDict:
+                ipaddr = addrDict[netifaces.AF_INET]["addr"]
+            assert netifaces.AF_PKT in addrDict:
+            macAddr = addrDict[netifaces.AF_INET]["addr"]
+
+        pkt = dhcp4msg({
+            'op': BOOTREQUEST,
+            'chaddr': macAddr,
+            'options': {
+                'message_type': DHCPDISCOVER,
+                'parameter_list': [
+                    1,                          # DHCP_OPTION_SUBNET_MASK
+                    3,                          # DHCP_OPTION_ROUTER
+                    6,                          # DHCP_OPTION_DOMAIN_NAME_SERVER
+                    12,                         # DHCP_OPTION_HOST_NAME
+                    15,                         # DHCP_OPTION_DOMAIN_NAME
+                    28,                         # DHCP_OPTION_BROADCAST
+                ],
+            },
+        })
+        # fixme: add SD_DHCP_OPTION_REQUESTED_IP_ADDRESS
+        # fixme: add SD_DHCP_OPTION_HOST_NAME
+
+        # We currently ignore:
+        # The client SHOULD wait a random time between one and ten seconds to
+        # desynchronize the use of DHCP at startup.
+        self.sock.put(pkt)
+
+    def client_send_request(self):
+        assert self.state in [DHCP_STATE_REQUESTING, DHCP_STATE_RENEWING, DHCP_STATE_REBINDING]
+
+        ipaddr = None
+        macaddr = None
+        if True:
+            addrDict = netifaces.ifaddresses(self.ifname)
+            if netifaces.AF_INET in addrDict:
+                ipaddr = addrDict[netifaces.AF_INET]["addr"]
+            assert netifaces.AF_PKT in addrDict:
+            macAddr = addrDict[netifaces.AF_INET]["addr"]
+
+        optionList = [
+            1,                          # DHCP_OPTION_SUBNET_MASK
+            3,                          # DHCP_OPTION_ROUTER
+            6,                          # DHCP_OPTION_DOMAIN_NAME_SERVER
+            12,                         # DHCP_OPTION_HOST_NAME
+            15,                         # DHCP_OPTION_DOMAIN_NAME
+            28,                         # DHCP_OPTION_BROADCAST
+        ]
+
+        if self.state == DHCP_STATE_REQUESTING:
+            pkt = dhcp4msg({
+                'op': BOOTREQUEST,
+                'chaddr': macaddr,
+                'options': {
+                    'message_type': DHCPREQUEST,
+                    'requested_ip': reply['yiaddr'],
+                    'server_id': reply['options']['server_id'],
+                    'parameter_list': optionList,
+                },
+            })
+            # log_dhcp_client(client, "REQUEST (requesting)");
+        elif self.state == DHCP_STATE_RENEWING:
+            pkt = dhcp4msg({
+                'op': BOOTREQUEST,
+                'chaddr': macaddr,
+                'options': {
+                    'message_type': DHCPREQUEST,
+                    'ciaddr': ipaddr,
+                    'parameter_list': optionList,
+                },
+            })
+            # log_dhcp_client(client, "REQUEST (renewing)");
+        elif self.state == DHCP_STATE_REBINDING:
+            pkt = dhcp4msg({
+                'op': BOOTREQUEST,
+                'chaddr': macaddr,
+                'options': {
+                    'message_type': DHCPREQUEST,
+                    'ciaddr': ipaddr,
+                    'parameter_list': optionList,
+                },
+            })
+            # log_dhcp_client(client, "REQUEST (rebinding)");
+        else:
+            assert False
+
+        # fixme: add SD_DHCP_OPTION_HOST_NAME
+
+        self.sock.put(pkt)
+}
 
 
 
@@ -113,7 +315,7 @@ class _DhcpClient(threading.Thread):
                 GLib.source_remove(self.timeout_resend)
                 self.state = DHCP_STATE_REQUESTING
                 self.attempt = 1
-                self.timeout_resend = GLib.timeout_add(0, self.client_timeout_resend)
+                self.timeout_resend = GLib.timeout_add(0, self._client_timeout_resend)
 
         elif self.state in [DHCP_STATE_REQUESTING, DHCP_STATE_RENEWING, DHCP_STATE_REBINDING]:
 
@@ -166,7 +368,7 @@ class _DhcpClient(threading.Thread):
                         if (r < 0)
                                 goto error;
 
-                        r = client_start_delayed(client);
+                        r = _client_start_delayed(client);
                         if (r < 0)
                                 goto error;
 
@@ -408,194 +610,6 @@ static int client_set_lease_timeouts(sd_dhcp_client *client) {
                     format_timespan(time_string, FORMAT_TIMESPAN_MAX, t1_timeout - time_now, USEC_PER_SEC));
 
     return 0;
-}
-
-
-    def client_start(self):
-        self.lease = None
-        self.state = DHCP_STATE_INIT
-        self.attempt = 1
-        self.xid = random()
-        self.timeout_resend = GLib.timeout_add(0, self.client_timeout_resend)
-
-        self.sock = DHCP4Socket(self.ifname)
-
-        self.poll = select.poll()
-        self.poll.register(self.sock, select.POLLIN | select.POLLPRI)
-
-    def client_stop(self):
-        self.onStop()
-
-        self.poll = None
-
-        if self.sock is not None:
-            self.sock.close()
-            self.sock = None
-
-        if self.timeout_resend is not None:
-            GLib.source_remove(self.timeout_resend)
-            self.timeout_resend = None
-        self.xid = None
-        self.attempt = None
-        self.state = None
-        self.lease = None
-
-    def client_timeout_resend(self):
-        # calculate next timeout
-        if self.state == DHCP_STATE_RENEWING:
-            time_left = (client.lease__t2 - client.lease__t1) / 2
-            time_left = max(time_left, 60)
-            next_timeout = time_left * USEC_PER_SEC;
-        elif self.state == DHCP_STATE_REBINDING:
-            time_left = (client.lease__lifetime - client.lease__t2) / 2
-            time_left = max(time_left, 60)
-            next_timeout = time_left * USEC_PER_SEC;
-        elif self.state in [DHCP_STATE_INIT, DHCP_STATE_SELECTING, DHCP_STATE_REQUESTING, DHCP_STATE_BOUND]:
-            if client.attempt < 64:
-                client.attempt *= 2
-            next_timeout = (client.attempt - 1) * USEC_PER_SEC;
-        else:
-            assert False
-        next_timeout += (random_u32() & 0x1fffff)
-
-        # do work
-        try:
-            if self.state == DHCP_STATE_INIT:
-                client_send_discover()
-                self.state = DHCP_STATE_SELECTING
-                self.attempt = 1
-            elif self.state == DHCP_STATE_SELECTING:
-                client_send_discover()
-            elif self.state in [DHCP_STATE_REQUESTING, DHCP_STATE_RENEWING, DHCP_STATE_REBINDING]:
-                client_send_request()
-                self.request_sent = time_now
-            elif self.state == DHCP_STATE_BOUND:
-                pass
-            else:
-                assert False
-        except:
-            if self.attempt >= 64
-                self.client_stop()
-                return False
-
-        self.timeout_resend = GLib.timeout_add(next_timeout, self.client_timeout_resend)
-        return False
-
-    def client_timeout_expire(self):
-        self.onExpired()
-        client_start(client)
-        return False
-
-    def client_timeout_t1(self):
-        # log_dhcp6_client(client, "Timeout T1");
-        self.state = DHCP_STATE_RENEWING
-        self.attempt = 1
-        self.timeout_resend = GLib.timeout_add(0, self.client_timeout_resend)
-        return False
-
-    def client_timeout_t2(self):
-        # log_dhcp6_client(client, "Timeout T2");
-        client.state = DHCP_STATE_REBINDING
-        client.attempt = 1
-        self.timeout_resend = GLib.timeout_add(0, self.client_timeout_resend)
-        return False
-
-    def client_send_discover(self):
-        assert self.state in [DHCP_STATE_INIT, DHCP_STATE_SELECTING]
-
-        ipaddr = None
-        macaddr = None
-        if True:
-            addrDict = netifaces.ifaddresses(self.ifname)
-            if netifaces.AF_INET in addrDict:
-                ipaddr = addrDict[netifaces.AF_INET]["addr"]
-            assert netifaces.AF_PKT in addrDict:
-            macAddr = addrDict[netifaces.AF_INET]["addr"]
-
-        pkt = dhcp4msg({
-            'op': BOOTREQUEST,
-            'chaddr': macAddr,
-            'options': {
-                'message_type': DHCPDISCOVER,
-                'parameter_list': [
-                    1,                          # DHCP_OPTION_SUBNET_MASK
-                    3,                          # DHCP_OPTION_ROUTER
-                    6,                          # DHCP_OPTION_DOMAIN_NAME_SERVER
-                    12,                         # DHCP_OPTION_HOST_NAME
-                    15,                         # DHCP_OPTION_DOMAIN_NAME
-                    28,                         # DHCP_OPTION_BROADCAST
-                ],
-            },
-        })
-        # fixme: add SD_DHCP_OPTION_REQUESTED_IP_ADDRESS
-        # fixme: add SD_DHCP_OPTION_HOST_NAME
-
-        # We currently ignore:
-        # The client SHOULD wait a random time between one and ten seconds to
-        # desynchronize the use of DHCP at startup.
-        self.sock.put(pkt)
-
-    def client_send_request(self):
-        assert self.state in [DHCP_STATE_REQUESTING, DHCP_STATE_RENEWING, DHCP_STATE_REBINDING]
-
-        ipaddr = None
-        macaddr = None
-        if True:
-            addrDict = netifaces.ifaddresses(self.ifname)
-            if netifaces.AF_INET in addrDict:
-                ipaddr = addrDict[netifaces.AF_INET]["addr"]
-            assert netifaces.AF_PKT in addrDict:
-            macAddr = addrDict[netifaces.AF_INET]["addr"]
-
-        optionList = [
-            1,                          # DHCP_OPTION_SUBNET_MASK
-            3,                          # DHCP_OPTION_ROUTER
-            6,                          # DHCP_OPTION_DOMAIN_NAME_SERVER
-            12,                         # DHCP_OPTION_HOST_NAME
-            15,                         # DHCP_OPTION_DOMAIN_NAME
-            28,                         # DHCP_OPTION_BROADCAST
-        ]
-
-        if self.state == DHCP_STATE_REQUESTING:
-            pkt = dhcp4msg({
-                'op': BOOTREQUEST,
-                'chaddr': macaddr,
-                'options': {
-                    'message_type': DHCPREQUEST,
-                    'requested_ip': reply['yiaddr'],
-                    'server_id': reply['options']['server_id'],
-                    'parameter_list': optionList,
-                },
-            })
-            # log_dhcp_client(client, "REQUEST (requesting)");
-        elif self.state == DHCP_STATE_RENEWING:
-            pkt = dhcp4msg({
-                'op': BOOTREQUEST,
-                'chaddr': macaddr,
-                'options': {
-                    'message_type': DHCPREQUEST,
-                    'ciaddr': ipaddr,
-                    'parameter_list': optionList,
-                },
-            })
-            # log_dhcp_client(client, "REQUEST (renewing)");
-        elif self.state == DHCP_STATE_REBINDING:
-            pkt = dhcp4msg({
-                'op': BOOTREQUEST,
-                'chaddr': macaddr,
-                'options': {
-                    'message_type': DHCPREQUEST,
-                    'ciaddr': ipaddr,
-                    'parameter_list': optionList,
-                },
-            })
-            # log_dhcp_client(client, "REQUEST (rebinding)");
-        else:
-            assert False
-
-        # fixme: add SD_DHCP_OPTION_HOST_NAME
-
-        self.sock.put(pkt)
 }
 
 
