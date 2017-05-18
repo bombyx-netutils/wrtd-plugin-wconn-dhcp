@@ -19,14 +19,7 @@ class _DhcpClient(threading.Thread):
         self.lease_t2 = None
         self.lease_lifetime = None
 
-
-        # bad
-        self.timeout_resend = None
-        self.timeout_t1 = None
-        self.timeout_t2 = None
-        self.timeout_expire = None
-        # end bad
-
+        self.efd_abort = None
         self.tfd_resend = None
         self.tfd_t1 = None
         self.tfd_t2 = None
@@ -48,41 +41,39 @@ class _DhcpClient(threading.Thread):
         self.bReportHostname = True
 
     def run(self):
-        self._client_start()
-
-        # fixme
-        # if (client->state == DHCP_STATE_INIT)
-        #         client->start_time = now(clock_boottime_or_monotonic());
-
-        self._sendDiscover()
-        while True:
-            events = poll.poll(2)
-            for (fd, event) in events:
-                if fd == self.efd_abort:                   # fixme: need .fileno(), same below
-                    self._client_stop()
-                    break
-                elif fd == self.tfd_resend:
-                    self._client_timeout_resend()
-                elif fd == self.tfd_t1:
-                    self._client_timeout_t1()
-                elif fd == self.tfd_t2:
-                    self._client_timeout_t2()
-                elif fd == self.tfd_expire:
-                    self._client_timeout_expire()
-                elif fd == self.sock and event & select.POLLIN:
-                    assert False
-                elif fd == self.sock and event & select.POLLPRI:
-                    assert False
-                else:
-                    assert False
+        try:
+            self._client_start()
+            while True:
+                events = poll.poll()
+                for (fd, event) in events:
+                    if fd == self.efd_abort:                   # fixme: may need .fileno(), same below
+                        break
+                    elif fd == self.tfd_resend:
+                        self._client_timeout_resend()
+                    elif fd == self.tfd_t1:
+                        self._client_timeout_t1()
+                    elif fd == self.tfd_t2:
+                        self._client_timeout_t2()
+                    elif fd == self.tfd_expire:
+                        self._client_timeout_expire()
+                    elif fd == self.sock and event & select.POLLIN:
+                        self._client_handle_message()
+                    elif fd == self.sock and event & select.POLLPRI:
+                        assert False
+                    else:
+                        assert False
+        finally:
+            self.onStop()
+            self._client_stop()
 
     def stop(self):
         self.efd_abort.write(1)
 
     def _client_start(self):
+        self.xid = random()
+
         self.state = DHCP_STATE_INIT
         self.attempt = 1
-        self.xid = random()
 
         self.sock = DHCP4Socket(self.ifname)
 
@@ -101,9 +92,9 @@ class _DhcpClient(threading.Thread):
         self.poll.register(self.tfd_t2, select.POLLIN)
         self.poll.register(self.tfd_expire, select.POLLIN)
 
-    def _client_stop(self):
-        self.onStop()
+        self.tfd_resend.settime(0, 0)
 
+    def _client_stop(self):
         self.poll = None
 
         if self.tfd_expire is not None:
@@ -130,9 +121,10 @@ class _DhcpClient(threading.Thread):
             self.sock.close()
             self.sock = None
 
-        self.xid = None
         self.attempt = None
         self.state = None
+
+        self.xid = None
 
     def _client_timeout_resend(self):
         # calculate next timeout
@@ -287,130 +279,94 @@ class _DhcpClient(threading.Thread):
         # fixme: add SD_DHCP_OPTION_HOST_NAME
 
         self.sock.put(pkt)
-}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def _clientHandleMessage(self):
+    def _client_handle_message(self, message):
         if self.state == DHCP_STATE_SELECTING:
-            r = client_handle_offer(client, message, len);
-            if r < 0:
-                return 0    # invalid message, let's ignore it
-
-                GLib.source_remove(self.timeout_resend)
+            try:
+                self.__client_handle_offer(message)
                 self.state = DHCP_STATE_REQUESTING
                 self.attempt = 1
-                self.timeout_resend = GLib.timeout_add(0, self._client_timeout_resend)
-
+                self.tfd_resend.settime(0, 0)
+            except InvalidPacket:
+                pass        # invalid message, let's ignore it
         elif self.state in [DHCP_STATE_REQUESTING, DHCP_STATE_RENEWING, DHCP_STATE_REBINDING]:
+            try:
+                self.__client_handle_ack(message)
 
-                r = client_handle_ack(client, message, len);
-                if (r >= 0) {
-                        client->start_delay = 0;
-                        GLib.source_remove(self.timeout_resend)
-                        client->receive_message =
-                                sd_event_source_unref(client->receive_message);
-                        client->fd = asynchronous_close(client->fd);
+                self.state = DHCP_STATE_BOUND
+                self.attempt = 1
 
-                        if (IN_SET(client->state, DHCP_STATE_REQUESTING))
-                                notify_event = SD_DHCP_CLIENT_EVENT_IP_ACQUIRE;
-                        else if (r != SD_DHCP_CLIENT_EVENT_IP_ACQUIRE)
-                                notify_event = r;
+                if self.lease_lifetime != 0xffffffff:
+                    # convert the various timeouts from relative (secs) to absolute (usecs)
+                    lifetime_timeout = client_compute_timeout(client, self.lease_lifetime, 1)
+                    t1_timeout = None
+                    t2_timeout = None
+                    if self.lease_t1 > 0 and self.lease_t2 > 0:
+                        # both T1 and T2 are given
+                        if self.lease_t1 < self.lease_t2 and self.lease_t2 < self.lease_lifetime:
+                            # they are both valid
+                            t2_timeout = client_compute_timeout(client, self.lease_t2, 1);
+                            t1_timeout = client_compute_timeout(client, self.lease_t1, 1);
+                        else:
+                            # discard both
+                            t2_timeout = client_compute_timeout(client, self.lease_lifetime, 7.0 / 8.0);
+                            self.lease_t2 = (self.lease_lifetime * 7) / 8;
+                            t1_timeout = client_compute_timeout(client, self.lease_lifetime, 0.5);
+                            self.lease_t1 = self.lease_lifetime / 2;
+                    elif self.lease_t2 > 0 and self.lease_t2 < self.lease_lifetime:
+                        # only T2 is given, and it is valid
+                        t2_timeout = client_compute_timeout(client, self.lease_t2, 1);
+                        t1_timeout = client_compute_timeout(client, self.lease_lifetime, 0.5);
+                        self.lease_t1 = self.lease_lifetime / 2;
+                        if t2_timeout <= t1_timeout:
+                            # the computed T1 would be invalid, so discard T2
+                            t2_timeout = client_compute_timeout(client, self.lease_lifetime, 7.0 / 8.0);
+                            self.lease_t2 = (self.lease_lifetime * 7) / 8;
+                    elif self.lease_t1 > 0 and self.lease_t1 < self.lease_lifetime:
+                        # only T1 is given, and it is valid
+                        t1_timeout = client_compute_timeout(client, self.lease_t1, 1);
+                        t2_timeout = client_compute_timeout(client, self.lease_lifetime, 7.0 / 8.0);
+                        self.lease_t2 = (self.lease_lifetime * 7) / 8;
+                        if t2_timeout <= t1_timeout:
+                            # the computed T2 would be invalid, so discard T1
+                            t2_timeout = client_compute_timeout(client, self.lease_lifetime, 0.5);
+                            self.lease_t2 = self.lease_lifetime / 2;
+                    else:
+                        # fall back to the default timeouts
+                        t1_timeout = client_compute_timeout(client, self.lease_lifetime, 0.5);
+                        self.lease_t1 = self.lease_lifetime / 2;
+                        t2_timeout = client_compute_timeout(client, self.lease_lifetime, 7.0 / 8.0);
+                        self.lease_t2 = (self.client_compute_timeoutlease_lifetime * 7) / 8;
 
-                        self.state = DHCP_STATE_BOUND
-                        self.attempt = 1
+                    self.tfd_expire.settime(lifetime_timeout)     # fixme unit?
+                    
+                    if lifetime_timeout <= time_now:
+                        return
+                    self.tfd_t2.settime(t2_timeout)
 
-                        client->last_addr = client->lease->address;
-
-                        r = client_set_lease_timeouts(client);
-                        if (r < 0) {
-                                log_dhcp_client(client, "could not set lease timeouts");
-                                goto error;
-                        }
-
-                        r = dhcp_network_bind_udp_socket(client->ifindex, client->lease->address, client->port);
-                        if (r < 0) {
-                                log_dhcp_client(client, "could not bind UDP socket");
-                                goto error;
-                        }
-
-                        client->fd = r;
-
-                        client_initialize_io_events(client, client_receive_message_udp);
-
-                        if (notify_event) {
-                                client_notify(client, notify_event);
-                                if (client->state == DHCP_STATE_STOPPED)
-                                        return 0;
-                        }
-
-                } else if (r == -EADDRNOTAVAIL) {
-                        /* got a NAK, let's restart the client */
-                        client->timeout_resend =
-                                sd_event_source_unref(client->timeout_resend);
-
-                        r = client_initialize(client);
-                        if (r < 0)
-                                goto error;
-
-                        r = _client_start_delayed(client);
-                        if (r < 0)
-                                goto error;
-
-                        log_dhcp_client(client, "REBOOT in %s", format_timespan(time_string, FORMAT_TIMESPAN_MAX,
-                                                                                client->start_delay, USEC_PER_SEC));
-
-                        client->start_delay = CLAMP(client->start_delay * 2,
-                                                    RESTART_AFTER_NAK_MIN_USEC, RESTART_AFTER_NAK_MAX_USEC);
-
-                        return 0;
-                } else if (r == -ENOMSG)
-                        /* invalid message, let's ignore it */
-                        return 0;
-
-                break;
+                    if t2_timeout <= time_now:
+                        return
+                    self.tfd_t1.settime(t1_timeout)
+            except NakPacket:
+                self._client_stop()
+                self._client_start()
+            except InvalidPacket:
+                pass        # invalid message, let's ignore it
 
         elif self.state == DHCP_STATE_BOUND:
+            try:
+                self.__client_handle_forcerenew(message)
+                self._client_timeout_t1()
+            except InvalidPacket:
+                pass        # invalid message, let's ignore it
+        elif self.state == DHCP_STATE_INIT:
+            pass            # invalid message, let's ignore it
+        else:
+            assert False
 
-                r = client_handle_forcerenew(client, message, len);
-                if (r >= 0) {
-                        r = client_timeout_t1(NULL, 0, client);
-                        if (r < 0)
-                                goto error;
-                } else if (r == -ENOMSG)
-                        /* invalid message, let's ignore it */
-                        return 0;
+    def __client_handle_offer(self):
 
-                break;
-
-        elif self.state in [DHCP_STATE_INIT, DHCP_STATE_INIT_REBOOT]:
-
-                break;
-
-        elif self.state ==  DHCP_STATE_STOPPED:
-                r = -EINVAL;
-                goto error;
-
-    def _clientHandleOffer(self):
-
-        r = dhcp_lease_new(&lease);
-        if (r < 0)
-                return r;
 
         if (client->client_id_len) {
                 r = dhcp_lease_set_client_id(lease,
@@ -446,17 +402,10 @@ class _DhcpClient(threading.Thread):
                 }
         }
 
-        sd_dhcp_lease_unref(client->lease);
-        client->lease = lease;
-        lease = NULL;
-
         log_dhcp_client(client, "OFFER");
 
-        return 0;
-}
 
-
-    def _clientHandleAck(self):
+    def __client_handle_ack(self):
 
 
 
@@ -496,7 +445,7 @@ class _DhcpClient(threading.Thread):
         }
 
         if (lease->subnet_mask == INADDR_ANY) {
-                r = dhcp_lease_set_default_subnet_mask(lease);
+                r = dhcp_lease_set_declient_compute_timeoutfault_subnet_mask(lease);
                 if (r < 0) {
                         log_dhcp_client(client, "received lease lacks subnet "
                                         "mask, and a fallback one can not be "
@@ -525,93 +474,7 @@ class _DhcpClient(threading.Thread):
 }
 
 
-
-
-static int client_set_lease_timeouts(sd_dhcp_client *client) {
-
-    GLib.source_remove(self.timeout_t1)
-    self.timeout_t1 = None
-    GLib.source_remove(self.timeout_t2)
-    self.timeout_t2 = None
-    GLib.source_remove(self.timeout_expire)
-    self.timeout_expire = None
-
-    /* don't set timers for infinite leases */
-    if (self.lease_lifetime == 0xffffffff)
-            return 0;
-
-    r = sd_event_now(client->event, clock_boottime_or_monotonic(), &time_now);
-    if (r < 0)
-            return r;
-    assert(client->request_sent <= time_now);
-
-    # convert the various timeouts from relative (secs) to absolute (usecs)
-    lifetime_timeout = client_compute_timeout(client, self.lease_lifetime, 1)
-    t1_timeout = None
-    t2_timeout = None
-    if self.lease_t1 > 0 and self.lease_t2 > 0:
-        # both T1 and T2 are given
-        if self.lease_t1 < self.lease_t2 and self.lease_t2 < self.lease_lifetime:
-            # they are both valid
-            t2_timeout = client_compute_timeout(client, self.lease_t2, 1);
-            t1_timeout = client_compute_timeout(client, self.lease_t1, 1);
-        else:
-            # discard both
-            t2_timeout = client_compute_timeout(client, self.lease_lifetime, 7.0 / 8.0);
-            self.lease_t2 = (self.lease_lifetime * 7) / 8;
-            t1_timeout = client_compute_timeout(client, self.lease_lifetime, 0.5);
-            self.lease_t1 = self.lease_lifetime / 2;
-    elif self.lease_t2 > 0 and self.lease_t2 < self.lease_lifetime:
-        # only T2 is given, and it is valid
-        t2_timeout = client_compute_timeout(client, self.lease_t2, 1);
-        t1_timeout = client_compute_timeout(client, self.lease_lifetime, 0.5);
-        self.lease_t1 = self.lease_lifetime / 2;
-        if t2_timeout <= t1_timeout:
-            # the computed T1 would be invalid, so discard T2
-            t2_timeout = client_compute_timeout(client, self.lease_lifetime, 7.0 / 8.0);
-            self.lease_t2 = (self.lease_lifetime * 7) / 8;
-    elif self.lease_t1 > 0 and self.lease_t1 < self.lease_lifetime:
-        # only T1 is given, and it is valid
-        t1_timeout = client_compute_timeout(client, self.lease_t1, 1);
-        t2_timeout = client_compute_timeout(client, self.lease_lifetime, 7.0 / 8.0);
-        self.lease_t2 = (self.lease_lifetime * 7) / 8;
-        if t2_timeout <= t1_timeout:
-            # the computed T2 would be invalid, so discard T1
-            t2_timeout = client_compute_timeout(client, self.lease_lifetime, 0.5);
-            self.lease_t2 = self.lease_lifetime / 2;
-    else:
-        # fall back to the default timeouts
-        t1_timeout = client_compute_timeout(client, self.lease_lifetime, 0.5);
-        self.lease_t1 = self.lease_lifetime / 2;
-        t2_timeout = client_compute_timeout(client, self.lease_lifetime, 7.0 / 8.0);
-        self.lease_t2 = (self.lease_lifetime * 7) / 8;
-
-    self.timeout_expire = GLib.timeout_add(lifetime_timeout, client_timeout_expire)     # fixme unit?
-
-    log_dhcp_client(client, "lease expires in %s",
-                    format_timespan(time_string, FORMAT_TIMESPAN_MAX, lifetime_timeout - time_now, USEC_PER_SEC));
-
-    /* don't arm earlier timeouts if this has already expired */
-    if (lifetime_timeout <= time_now)
-            return 0;
-
-    self.timeout_t2 = GLib.timeout_add(t2_timeout, client_timeout_t2)
-
-    log_dhcp_client(client, "T2 expires in %s",
-                    format_timespan(time_string, FORMAT_TIMESPAN_MAX, t2_timeout - time_now, USEC_PER_SEC));
-
-    /* don't arm earlier timeout if this has already expired */
-    if (t2_timeout <= time_now)
-            return 0;
-
-    self.timeout_t1 = GLib.timeout_add(t1_timeout, client_timeout_t1)
-
-    log_dhcp_client(client, "T1 expires in %s",
-                    format_timespan(time_string, FORMAT_TIMESPAN_MAX, t1_timeout - time_now, USEC_PER_SEC));
-
-    return 0;
-}
-
+    def __client_handle_forcerenew(self):
 
 
 
@@ -650,7 +513,7 @@ static int client_set_lease_timeouts(sd_dhcp_client *client) {
             IP(src=self.client_ip, dst=self.server_ip) /
             UDP(sport=self.client_port, dport=self.server_port) /
             BOOTP(chaddr=[self.client_mac], xid=self.client_xid) /
-            DHCP(options=[
+            DHCP(options=[client_compute_timeout
                 ("message-type", "request"),
                 ("param_req_list", PARAM_REQ_LIST),
                 ("max_dhcp_size", MAX_DHCP_LEASE),
@@ -721,7 +584,7 @@ static int client_set_lease_timeouts(sd_dhcp_client *client) {
                 time.sleep(1.0)
                 i += 1
                 continue
-            break
+            breakclient_compute_timeout
 
 
 
