@@ -1,4 +1,4 @@
-from test import _DhcpClient
+from dhcpc import DhcpClient
 
-c = _DhcpClient("enp0s25")
+c = DhcpClient("enp0s25")
 c.start()
