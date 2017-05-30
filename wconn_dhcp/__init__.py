@@ -2,15 +2,13 @@
 # -*- coding: utf-8; tab-width: 4; indent-tabs-mode: t -*-
 
 import os
-import time
 import fcntl
 import socket
 import struct
 import logging
+import pyroute2
 import netifaces
-import subprocess
-from pyroute2.dhcp.dhcp4socket import DHCP4Socket
-
+from dhcpc import DhcpClient
 
 
 def get_plugin_list():
@@ -36,16 +34,22 @@ class _PluginObject:
         self.tmpDir = tmpDir
         self.ownResolvConf = ownResolvConf
         self.prefixCheckFunc = prefixCheckFunc
+
+        self.logger = logging.getLogger(__name__ + ".generic-dhcp")
         self.dhClient = None
 
     def start(self):
-        pass
+        self.logger.info("Started.")
 
     def stop(self):
         if self.dhClient is not None:
             self.dhClient.stop()
             self.dhClient = None
-        _Util.setInterfaceUpDown(self.cfg["interface"], False)
+            with pyroute2.IPRoute() as ip:
+                idx = ip.link_lookup(ifname=self.cfg["interface"])[0]
+                ip.link("set", index=idx, state="down")
+            self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
+        self.logger.info("Stopped.")
 
     def get_out_interface(self):
         return None
@@ -54,13 +58,15 @@ class _PluginObject:
         if ifname != self.cfg["interface"]:
             return False
 
-        _Util.setInterfaceUpDown(self.cfg["interface"], True)
+        with pyroute2.IPRoute() as ip:
+            idx = ip.link_lookup(ifname=self.cfg["interface"])[0]
+            ip.link("set", index=idx, state="up")
 
         assert self.dhClient is None
-        self.dhClient = _DhcpClient(self.cfg["interface"])
+        self.dhClient = DhcpClient(self.cfg["interface"], _BackEnd(self))
         self.dhClient.start()
 
-        logging.info("WAN: Internet interface \"%s\" is managed." % (self.cfg["interface"]))
+        self.logger.info("Interface \"%s\" managed." % (self.cfg["interface"]))
         return True
 
     def interface_disappear(self, ifname):
@@ -68,29 +74,39 @@ class _PluginObject:
         if self.dhClient is not None:
             self.dhClient.stop()
             self.dhClient = None
+        self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
 
 
-class _Util:
+class _BackEnd:
 
-    @staticmethod
-    def setInterfaceUpDown(ifname, upOrDown):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            ifreq = struct.pack("16sh", ifname.encode("ascii"), 0)
-            ret = fcntl.ioctl(s.fileno(), 0x8913, ifreq)
-            flags = struct.unpack("16sh", ret)[1]                   # SIOCGIFFLAGS
+    def __init__(self, pObj):
+        self.pObj = pObj
+        self.addr = None
 
-            if upOrDown:
-                flags |= 0x1
-            else:
-                flags &= ~0x1
+    def get_saved_lease(self):
+        return None
 
-            ifreq = struct.pack("16sh", ifname.encode("ascii"), flags)
-            fcntl.ioctl(s.fileno(), 0x8914, ifreq)                  # SIOCSIFFLAGS
-        finally:
-            s.close()
+    def lease_acquired(self, ifname, lease):
+        # delete old address
+        if self.addr is not None:
+            with pyroute2.IPRoute() as ip:
+                idx = ip.link_lookup(ifname=ifname)[0]
+                ip.addr("delete", index=idx, address=self.addr)
+            self.addr = None
 
+        # set new address, default route and dns information
+        with pyroute2.IPRoute() as ipp:
+            idx = ipp.link_lookup(ifname=ifname)[0]
+            ipp.addr("add", index=idx, address=lease.address, mask=lease.subnet_mask, broadcast=lease.broadcast)
+            ipp.route("add", dst="0.0.0.0/0", gateway=lease.router[0], oif=idx)
+        self.addr = lease.address
 
+    def lease_updated(self, ifname, lease):
+        self.lease_acquired(ifname, lease)
 
-
-
+    def lease_destroyed(self, ifname):
+        if self.addr is not None:
+            with pyroute2.IPRoute() as ip:
+                idx = ip.link_lookup(ifname=ifname)[0]
+                ip.addr("delete", index=idx, address=self.addr)
+            self.addr = None
