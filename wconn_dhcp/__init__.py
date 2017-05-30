@@ -3,9 +3,10 @@
 
 import os
 import time
+import fcntl
 import socket
+import struct
 import logging
-import pyroute2
 import netifaces
 import subprocess
 
@@ -43,9 +44,7 @@ class _PluginObject:
             self.proc.terminate()
             self.proc.join()
             self.proc = None
-            with pyroute2.IPRoute() as ip:
-                idx = ip.link_lookup(ifname=self.cfg["interface"])[0]
-                ip.link("set", index=idx, state="down")
+            _Util.setInterfaceUpDown(self.cfg["interface"], False)
             self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
         self.logger.info("Stopped.")
 
@@ -57,10 +56,7 @@ class _PluginObject:
             return False
 
         assert self.proc is None
-
-        with pyroute2.IPRoute() as ip:
-            idx = ip.link_lookup(ifname=self.cfg["interface"])[0]
-            ip.link("set", index=idx, state="up")
+        _Util.setInterfaceUpDown(self.cfg["interface"], True)
 
         # create dhclient.conf, copied from nm-dhcp-dhclient-utils.c in networkmanager-1.4.4
         cfgf = os.path.join(self.tmpDir, "dhclient.conf")
@@ -108,3 +104,24 @@ class _PluginObject:
             self.proc.wait()
             self.proc = None
         self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
+
+
+class _Util:
+
+    @staticmethod
+    def setInterfaceUpDown(ifname, upOrDown):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            ifreq = struct.pack("16sh", ifname.encode("ascii"), 0)
+            ret = fcntl.ioctl(s.fileno(), 0x8913, ifreq)
+            flags = struct.unpack("16sh", ret)[1]                   # SIOCGIFFLAGS
+
+            if upOrDown:
+                flags |= 0x1
+            else:
+                flags &= ~0x1
+
+            ifreq = struct.pack("16sh", ifname.encode("ascii"), flags)
+            fcntl.ioctl(s.fileno(), 0x8914, ifreq)                  # SIOCSIFFLAGS
+        finally:
+            s.close()
