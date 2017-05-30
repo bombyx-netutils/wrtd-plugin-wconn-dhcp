@@ -8,6 +8,7 @@ import socket
 import struct
 import logging
 import netifaces
+import ipaddress
 import subprocess
 
 
@@ -29,11 +30,13 @@ class _PluginObject:
     def __init__(self):
         pass
 
-    def init2(self, cfg, tmpDir, ownResolvConf):
+    def init2(self, cfg, tmpDir, ownResolvConf, upCallback, downCallback):
         self.cfg = cfg
         self.tmpDir = tmpDir
         self.ownResolvConf = ownResolvConf
-        self.logger = logging.getLogger(self.__module__ + "." + self.__class__.__name__ + ".generic-dhcp")
+        self.upCallback = upCallback
+        self.downCallback = downCallback
+        self.logger = logging.getLogger(self.__module__ + "." + self.__class__.__name__)
         self.proc = None
 
     def start(self):
@@ -45,11 +48,26 @@ class _PluginObject:
             self.proc.join()
             self.proc = None
             _Util.setInterfaceUpDown(self.cfg["interface"], False)
+            self.downCallback()
             self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
         self.logger.info("Stopped.")
 
-    def get_out_interface(self):
-        return None
+    def is_alive(self):
+        return self.proc is not None and netifaces.AF_INET in netifaces.ifaddresses(self.cfg["interface"])
+
+    def get_prefix_list(self):
+        if self.is_alive():
+            t = netifaces.ifaddresses(self.cfg["interface"])
+            netobj = ipaddress.IPv4Network(t[netifaces.AF_INET]["addr"], t[netifaces.AF_INET]["netmask"], False)
+            return (str(netobj.address), str(netobj.netmask))
+        else:
+            return None
+
+    def get_interface(self):
+        if self.is_alive():
+            return self.cfg["interface"]
+        else:
+            return None
 
     def interface_appear(self, ifname):
         if ifname != self.cfg["interface"]:
@@ -85,8 +103,7 @@ class _PluginObject:
         # wait for ip address
         i = 0
         while True:
-            t = netifaces.ifaddresses(self.cfg["interface"])
-            if 2 not in t:
+            if netifaces.AF_INET not in netifaces.ifaddresses(self.cfg["interface"]):
                 if i >= 10:
                     raise Exception("IP address allocation time out.")
                 time.sleep(1.0)
@@ -95,6 +112,7 @@ class _PluginObject:
             break
 
         self.logger.info("Interface \"%s\" managed." % (self.cfg["interface"]))
+        self.upCallback()
         return True
 
     def interface_disappear(self, ifname):
@@ -103,6 +121,7 @@ class _PluginObject:
             self.proc.terminate()
             self.proc.wait()
             self.proc = None
+        self.downCallback()
         self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
 
 
