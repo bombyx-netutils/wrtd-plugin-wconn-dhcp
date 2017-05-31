@@ -64,7 +64,7 @@ class _PluginObject:
     def get_prefix_list(self):
         if self.is_alive():
             t = netifaces.ifaddresses(self.cfg["interface"])
-            netobj = ipaddress.IPv4Network(t[netifaces.AF_INET]["addr"], t[netifaces.AF_INET]["netmask"], False)
+            netobj = ipaddress.IPv4Network(t[netifaces.AF_INET]["addr"] + "/" + t[netifaces.AF_INET]["netmask"], strict=False)
             return [(str(netobj.network_address), str(netobj.netmask))]
         else:
             return None
