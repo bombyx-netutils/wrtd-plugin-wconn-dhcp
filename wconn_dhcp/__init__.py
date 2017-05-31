@@ -42,7 +42,7 @@ class _PluginObject:
     def stop(self):
         if self.proc is not None:
             self.proc.terminate()
-            self.proc.join()
+            self.proc.wait()
             self.proc = None
             _Util.setInterfaceUpDown(self.cfg["interface"], False)
             self.downCallback()
