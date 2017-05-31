@@ -8,8 +8,10 @@ import socket
 import struct
 import logging
 import netifaces
+import threading
 import ipaddress
 import subprocess
+from gi.repository import GLib
 
 
 def get_plugin_list():
@@ -34,12 +36,18 @@ class _PluginObject:
         self.upCallback = upCallback
         self.downCallback = downCallback
         self.logger = logging.getLogger(self.__module__ + "." + self.__class__.__name__)
+
         self.proc = None
+        self.waitIpThread = None
 
     def start(self):
         self.logger.info("Started.")
 
     def stop(self):
+        if self.waitIpThread is not None:
+            self.waitIpThread.stop()
+            self.waitIpThread.join()
+            self.waitIpThread = None
         if self.proc is not None:
             self.proc.terminate()
             self.proc.wait()
@@ -88,6 +96,7 @@ class _PluginObject:
             buf += "also request ntp-servers;\n"
             f.write(buf)
 
+        # create dhclient process
         self.proc = subprocess.Popen([
             "/usr/bin/python3",
             os.path.join(os.path.dirname(os.path.realpath(__file__)), "subproc_dhclient.py"),
@@ -97,23 +106,19 @@ class _PluginObject:
             self.ownResolvConf,
         ])
 
-        # wait for ip address
-        i = 0
-        while True:
-            if netifaces.AF_INET not in netifaces.ifaddresses(self.cfg["interface"]):
-                if i >= 10:
-                    raise Exception("IP address allocation time out.")
-                time.sleep(1.0)
-                i += 1
-                continue
-            break
+        # start wait ip thread
+        self.waitIpThread = _WaitIpThread(self)
+        self.waitIpThread.start()
 
         self.logger.info("Interface \"%s\" managed." % (self.cfg["interface"]))
-        self.upCallback()
         return True
 
     def interface_disappear(self, ifname):
         assert ifname == self.cfg["interface"]
+        if self.waitIpThread is not None:
+            self.waitIpThread.stop()
+            self.waitIpThread.join()
+            self.waitIpThread = None
         if self.proc is not None:
             self.proc.terminate()
             self.proc.wait()
@@ -122,7 +127,34 @@ class _PluginObject:
         self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
 
 
+class _WaitIpThread(threading.Thread):
+
+    def __init__(self, pObj):
+        threading.Thread.__init__(self)
+        self.pObj = pObj
+        self.bStop = False
+
+    def run(self):
+        while not self.bStop:
+            t = netifaces.ifaddresses(self.pObj.cfg["interface"])
+            if netifaces.AF_INET not in t:
+                time.sleep(1.0)
+                continue
+            _Util.idleInvoke(self.pObj.upCallback)
+            break
+
+    def stop(self):
+        self.bStop = True
+
+
 class _Util:
+
+    @staticmethod
+    def idleInvoke(func, *args):
+        def _idleCallback(func, *args):
+            func(*args)
+            return False
+        GLib.idle_add(_idleCallback, func, *args)
 
     @staticmethod
     def setInterfaceUpDown(ifname, upOrDown):

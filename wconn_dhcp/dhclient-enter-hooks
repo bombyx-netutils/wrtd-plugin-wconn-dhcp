@@ -1,6 +1,10 @@
 #!/bin/sh
 
+echo "debug1" >> /a.txt
+
 make_resolv_conf() {
+  echo "debug3" >> /a.txt
+
   if [ x"$PEER_DNS" != x ] && [ x"$PEER_DNS" != xyes ]; then
     return 0
   fi

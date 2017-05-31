@@ -55,7 +55,7 @@ class _UtilNewMountNamespace:
         self.parentfd = None
 
 
-assert len(sys.argv) == 4
+assert len(sys.argv) == 5
 tmpDir = sys.argv[1]
 cfgf = sys.argv[2]
 intfName = sys.argv[3]
