@@ -19,15 +19,12 @@ def get_plugin_list():
 
 def get_plugin(name):
     if name == "generic-dhcp":
-        return _PluginObject(None)
+        return _PluginObject()
     else:
         assert False
 
 
 class _PluginObject:
-
-    def __init__(self):
-        pass
 
     def init2(self, cfg, tmpDir, ownResolvConf, prefixCheckFunc):
         self.cfg = cfg
