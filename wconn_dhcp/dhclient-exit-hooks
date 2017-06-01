@@ -1,7 +1,5 @@
 #!/bin/sh
 
-echo "debug2" >> /a.txt
-
 if [ x"$new_rfc3442_classless_static_routes" != x"" ]; then
     if [ x"$reason" == x"BOUND" -o x"$reason" == x"REBOOT" ]; then
 		rfc_routes=($new_rfc3442_classless_static_routes)
