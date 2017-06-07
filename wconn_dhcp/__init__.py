@@ -60,11 +60,13 @@ class _PluginObject:
     def is_alive(self):
         return self.proc is not None and netifaces.AF_INET in netifaces.ifaddresses(self.cfg["interface"])
 
+    def get_ip(self):
+        assert self.is_alive()
+        return netifaces.ifaddresses(self.cfg["interface"])[netifaces.AF_INET][0]["addr"]
+
     def get_interface(self):
-        if self.is_alive():
-            return self.cfg["interface"]
-        else:
-            return None
+        assert self.is_alive()
+        return self.cfg["interface"]
 
     def get_prefix_list(self):
         if self.is_alive():
