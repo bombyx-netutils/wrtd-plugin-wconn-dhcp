@@ -41,7 +41,7 @@ class _PluginObject:
         self.waitIpThread = None
 
     def start(self):
-        self.logger.info("Started.")
+        pass
 
     def stop(self):
         if self.waitIpThread is not None:
@@ -55,7 +55,6 @@ class _PluginObject:
             _Util.setInterfaceUpDown(self.cfg["interface"], False)
             self.downCallback()
             self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
-        self.logger.info("Stopped.")
 
     def is_connected(self):
         return self.proc is not None and netifaces.AF_INET in netifaces.ifaddresses(self.cfg["interface"])
@@ -135,13 +134,16 @@ class _WaitIpThread(threading.Thread):
         self.bStop = False
 
     def run(self):
+        count = 0
         while not self.bStop:
-            t = netifaces.ifaddresses(self.pObj.cfg["interface"])
-            if netifaces.AF_INET not in t:
-                time.sleep(1.0)
-                continue
-            _Util.idleInvoke(self.pObj.upCallback)
-            break
+            if netifaces.AF_INET in netifaces.ifaddresses(self.pObj.cfg["interface"]):
+                count += 1
+            else:
+                count = 0
+            if count >= 3:
+                _Util.idleInvoke(self.pObj.upCallback)      # ip address must be stablized for 3 seconds
+                break
+            time.sleep(1.0)
 
     def stop(self):
         self.bStop = True
