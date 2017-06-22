@@ -39,6 +39,7 @@ class _PluginObject:
 
         self.proc = None
         self.waitIpThread = None
+        self.bAlive = False
 
     def start(self):
         pass
@@ -53,22 +54,24 @@ class _PluginObject:
             self.proc.wait()
             self.proc = None
             _Util.setInterfaceUpDown(self.cfg["interface"], False)
+        if self.bAlive:
             self.downCallback()
+            self.bAlive = False
             self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
 
     def is_connected(self):
-        return self.proc is not None and netifaces.AF_INET in netifaces.ifaddresses(self.cfg["interface"])
+        return self.bAlive
 
     def get_ip(self):
-        assert self.is_connected()
+        assert self.bAlive
         return netifaces.ifaddresses(self.cfg["interface"])[netifaces.AF_INET][0]["addr"]
 
     def get_interface(self):
-        assert self.is_connected()
+        assert self.bAlive
         return self.cfg["interface"]
 
     def get_prefix_list(self):
-        assert self.is_connected()
+        assert self.bAlive
         t = netifaces.ifaddresses(self.cfg["interface"])
         netobj = ipaddress.IPv4Network(t[netifaces.AF_INET][0]["addr"] + "/" + t[netifaces.AF_INET][0]["netmask"], strict=False)
         return [(str(netobj.network_address), str(netobj.netmask))]
@@ -109,7 +112,6 @@ class _PluginObject:
         self.waitIpThread = _WaitIpThread(self)
         self.waitIpThread.start()
 
-        self.logger.info("Interface \"%s\" managed." % (self.cfg["interface"]))
         return True
 
     def interface_disappear(self, ifname):
@@ -122,8 +124,18 @@ class _PluginObject:
             self.proc.terminate()
             self.proc.wait()
             self.proc = None
-        self.downCallback()
-        self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
+        if self.bAlive:
+            self.downCallback()
+            self.bAlive = False
+            self.logger.info("Interface \"%s\" unmanaged." % (self.cfg["interface"]))
+
+    def _upCallback(self):
+        self.bAlive = True
+        self.logger.info("Interface \"%s\" managed." % (self.cfg["interface"]))
+        try:
+            self.upCallback()
+        except:
+            assert False               # fixme, what to do?
 
 
 class _WaitIpThread(threading.Thread):
@@ -141,9 +153,10 @@ class _WaitIpThread(threading.Thread):
             else:
                 count = 0
             if count >= 3:
-                _Util.idleInvoke(self.pObj.upCallback)      # ip address must be stablized for 3 seconds
+                _Util.idleInvoke(self.pObj._upCallback)      # ip address must be stablized for 3 seconds
                 break
             time.sleep(1.0)
+        self.waitIpThread = None
 
     def stop(self):
         self.bStop = True
