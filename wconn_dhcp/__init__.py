@@ -9,7 +9,6 @@ import struct
 import logging
 import netifaces
 import threading
-import ipaddress
 import subprocess
 from gi.repository import GLib
 
@@ -66,15 +65,17 @@ class _PluginObject:
         assert self.bAlive
         return netifaces.ifaddresses(self.cfg["interface"])[netifaces.AF_INET][0]["addr"]
 
+    def get_netmask(self):
+        assert self.bAlive
+        return netifaces.ifaddresses(self.cfg["interface"])[netifaces.AF_INET][0]["netmask"]
+
     def get_interface(self):
         assert self.bAlive
         return self.cfg["interface"]
 
-    def get_prefix_list(self):
+    def get_extra_prefix_list(self):
         assert self.bAlive
-        t = netifaces.ifaddresses(self.cfg["interface"])
-        netobj = ipaddress.IPv4Network(t[netifaces.AF_INET][0]["addr"] + "/" + t[netifaces.AF_INET][0]["netmask"], strict=False)
-        return [(str(netobj.network_address), str(netobj.netmask))]
+        return []
 
     def interface_appear(self, ifname):
         if ifname != self.cfg["interface"]:
