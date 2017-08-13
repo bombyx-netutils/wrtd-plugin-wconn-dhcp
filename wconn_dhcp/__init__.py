@@ -40,6 +40,9 @@ class _PluginObject:
         self.waitIpThread = None
         self.bAlive = False
 
+    def get_interface(self):
+        return self.cfg["interface"]
+
     def start(self):
         pass
 
@@ -68,10 +71,6 @@ class _PluginObject:
     def get_netmask(self):
         assert self.bAlive
         return netifaces.ifaddresses(self.cfg["interface"])[netifaces.AF_INET][0]["netmask"]
-
-    def get_interface(self):
-        assert self.bAlive
-        return self.cfg["interface"]
 
     def get_extra_prefix_list(self):
         assert self.bAlive
