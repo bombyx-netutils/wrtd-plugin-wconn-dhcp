@@ -76,6 +76,10 @@ class _PluginObject:
         assert self.bAlive
         return []
 
+    def get_business_attributes(self):
+        assert self.bAlive
+        return dict()
+
     def interface_appear(self, ifname):
         if ifname != self.cfg["interface"]:
             return False
